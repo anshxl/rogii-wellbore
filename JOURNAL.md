@@ -596,3 +596,289 @@ Phase 1 (build a strong baseline + first LB anchor) is **done**.
   unless they're substantial. The next real lever is structural
   (different-observation aligner) or model-class (e.g., a sequence
   model) — not feature-engineering tweaks.
+
+## 2026-05-08 — Phase 2 EDA: per-well diagnosis of worst 20 wells
+
+**What:** Built [src/eda_phase2_plots.py](src/eda_phase2_plots.py) — a
+3-panel diagnostic plot per well: (A) horizontal GR vs MD with end-of-prefix
+marker; (B) typewell GR vs TVT with shaded bands for the true hidden-zone
+TVT range (green) and each of 7 aligners' predicted TVT ranges (beam_tight,
+beam_cons, beam_loose, beam_vloose, pf, ancc, dtw); (C) TVT vs MD with all
+7 aligner paths + ensemble + truth + `TVT_input` prefix. Driven by
+[notebooks/eda_phase2.ipynb](notebooks/eda_phase2.ipynb) which selects the
+top-20 worst wells by ensemble OOF RMSE and 5 wells near median RMSE as
+contrast. 25 PNGs in [eda_outputs/figs/phase2/](eda_outputs/figs/phase2/).
+Findings appended to [eda_findings.md](eda_findings.md). Spec at
+[docs/superpowers/specs/2026-05-08-phase2-eda-worst-wells-design.md](docs/superpowers/specs/2026-05-08-phase2-eda-worst-wells-design.md).
+
+**Findings:**
+- **Look-alike-layer failure confirmed visually.** On 14 of 14 worst wells
+  inspected, Panel B shows the truth band and the stacked aligner bands
+  sitting 30–50 TVT units apart over typewell regions with visually
+  similar GR character (similar mean/spread, similar peak structure).
+  Classic alignment ambiguity — the wells aren't pathological in any
+  EDA-derivable way, they just live in low-distinctiveness GR
+  neighborhoods of their typewells.
+- **All 7 aligners cluster together and disagree with truth in lockstep.**
+  Structural signature of a shared GR-magnitude likelihood. DTW (added
+  yesterday) helped via feature diversification, not by escaping the
+  shared observation model.
+- **Bias is sign-mixed, not directional.** Of the 14 worst inspected,
+  9 are negative (predict too shallow) and 5 are positive (too deep).
+  The failure is "lock onto wrong layer", not a systematic offset.
+- **Easy-well contrast (47222616, 5aa03df7, dc7f9757, all RMSE 7.6):**
+  truth and aligner bands *overlap* in Panel B, and the relevant typewell
+  region contains a distinctive feature (sharp transition, plateau
+  boundary, unique trough). Easy ↔ hard is determined by *local typewell
+  distinctiveness* near the truth, not by intrinsic well properties.
+- **Trajectory-shape failures observed (Panel C).** 1b1eba53, c8d9680c,
+  91db7070, 5f4d2a52: aligners trajectory is flat while truth dips 30–50
+  units. ba48188d, 7e721392: aligners over-extrapolate prefix slope while
+  truth flattens. The aligners are not getting dipping-rate signal from
+  GR — they inherit it from the prefix or the smoothness prior. A
+  trend-aware likelihood would constrain trajectory shape directly.
+
+**Decisions / next steps:**
+1. **Build a different-observation DTW aligner** with a composite
+   likelihood combining `dGR/dMD` (gradient) and a low-pass GR (σ ≈ 50–100
+   ft TVT) component, with a small weight on the existing GR-magnitude
+   term. Both are CSV-derivable and test-time legal. The two components
+   target the two failure modes seen in the panels — gradient breaks the
+   look-alike ambiguity in regions where adjacent typewell layers have
+   similar magnitudes but different dynamics; low-pass GR makes the slow
+   trend the primary match signal rather than mixing it with HF noise.
+   Implement on top of the existing DTW code in [src/baseline.py](src/baseline.py).
+2. **Run the 3-model ensemble (XGB+CB+tuned-LGB) in parallel** as the
+   cheap side track. Re-run NM weight optimisation; if tuned-LGB takes
+   >5% weight, submit.
+3. **Recorded for v2 EDA:** typewell `Geology`-segment overlay on Panel B
+   would test whether geology is a free disambiguator (currently unused
+   by every aligner). Cheap to add if the gradient/low-pass aligner
+   doesn't fully close the gap.
+4. **Recorded for future:** PNG-derived features from `data/train/{well}.png`
+   as a training-only auxiliary signal. Out of scope until current
+   alternate-observation work is done.
+
+**Surprises:**
+- The look-alike-layer hypothesis from the per-well-OOF entry survived
+  contact with the actual plots. Every worst well has a clean visual
+  signature for it. I had budgeted 1–2 sessions to potentially fall back
+  to "patterns are diffuse" and need to add derivatives/multi-scale to
+  the panels (the v2 path in the spec). Didn't need it.
+- The easy-vs-hard split is not a property of the *well* — it's a property
+  of the *typewell region* that the well's hidden zone happens to traverse.
+  Wells in distinctive-GR neighborhoods are easy regardless of hidden_ratio,
+  prefix length, or pad cluster. Wells in low-distinctiveness neighborhoods
+  are hard regardless of any of those. This is a stronger framing than
+  the EDA's "difficulty cluster" (which was about wells) and explains why
+  the per-well RMSE distribution is so heavy-tailed: difficulty is a
+  function of the local typewell, and a small minority of typewell
+  regions are degenerate.
+- Several worst wells fail trajectory-shape, not just absolute position.
+  This wasn't visible in any aggregate metric — `bias_ens` only tells you
+  the centroid of the residual, not whether the residual is a flat offset
+  or a shape mismatch. Suggests RMSE-of-residual-trend (or a per-well
+  fit quality of `pred - truth` against MD) would be a useful future
+  diagnostic.
+
+## 2026-05-08 — Composite-emit DTW (dtwc): negative result, removed
+
+**What:** Built a fourth aligner — composite-emit DTW (5c) — informed by
+Phase 2 EDA. Same banded DP as the existing DTW, but with an emit cost
+that combines (a) GR-magnitude (existing, weight 0.5), (b) gradient
+`dGR/dMD` (new, weight 1.0), and (c) low-pass GR (new, weight 1.0).
+Implementation in [src/experiments/dtwc.py](src/experiments/dtwc.py) — kept
+as documented experimental code, removed from
+[src/baseline.py](src/baseline.py) after the negative result. Geology
+overlay on Panel B was the prerequisite step (added to
+[src/eda_phase2_plots.py](src/eda_phase2_plots.py)) and itself produced a
+decisive negative result — geology does not disambiguate the look-alike
+failure because EGFDL is the dominant zone for both truth and prediction.
+
+**Findings:**
+
+Smoke test (raw aligner RMSE on 25 EDA wells, dtw vs dtwc):
+
+| group   | mean dtw RMSE | mean dtwc RMSE | mean Δ |
+|---------|---------------|----------------|--------|
+| Worst-20| 41.16         | 35.23          | −5.92  |
+| Easy-5  | 14.13         | 21.89          | +7.76  |
+
+Strong improvement on hard wells (e.g., 2fd68f7b 69 → 32, a959858c 78 →
+45, 6d6d93af 56 → 19) but regressions on easy wells (fb3848a1 5.6 → 39).
+
+Full XGB+CB CV (tag-grouped, 5-fold):
+
+| metric            | dtw only       | dtw + dtwc     | Δ        |
+|-------------------|----------------|----------------|----------|
+| XGB OOF           | 12.612         | 12.625         | +0.013   |
+| CB OOF            | 12.661         | 12.697         | +0.036   |
+| Ensemble OOF (NM) | **12.531**     | **12.551**     | **+0.020** |
+| p50 per-well RMSE | 7.63           | 7.74           | +0.11    |
+| p90 per-well RMSE | 18.46          | 18.73          | +0.27    |
+| p99 per-well RMSE | 39.72          | 38.56          | −1.16    |
+| Worst-20 mean RMSE| 38.28          | 38.23          | −0.05    |
+
+Right tail compressed slightly (p99 −1.16) but the bulk of the
+distribution shifted worse. Worst-20 ensemble RMSE is essentially flat
+(9 / 20 improved, 11 / 20 regressed). The 6-RMSE per-well wins from the
+smoke test did not translate to the ensemble — XGB+CB already had enough
+signal from existing aligners + disagreement features to handle most of
+those wells, and on easy wells the new `dtwc_minus_*` features look like
+noise.
+
+**Interpretation:** The smoke-test pre-test asked the wrong question. It
+measured raw dtwc RMSE vs raw dtw RMSE, which would matter if the
+pipeline used a single aligner. But the GBDT ensemble's job is to
+arbitrate between aligners per row, and the new disagreement features
+(`dtwc_minus_dtw`, `dtwc_minus_beam_cons`, …) don't tell the GBDTs
+*which* aligner is right when they differ. Adding aligners helps only
+when the GBDTs can either (a) consistently arbitrate or (b) get a stable
+diversification effect via NM ensembling. dtw already provided the
+latter (NM weight from CB was reduced 0.60 → 0.44 when dtw was added);
+dtwc provides neither.
+
+**Decisions / next steps:**
+
+1. **Drop dtwc.** Reverted to dtw-only pipeline. Rationale per
+   [docs/superpowers/specs/...](docs/superpowers/specs/) and prior
+   journal lesson: "trust OOF Δ as the reliable signal of improvement;
+   don't chase LB-Δ on a single submission — sample-noise on 52 wells
+   is large." Submitting on +0.02 OOF would burn a submission to learn
+   nothing.
+2. **Pivot to FE Round 2** (the user's plan #4 from this session, now
+   reordered to #1). Two cheap items:
+   - Drop zero-gain features from existing 117 — `feature_importance.parquet`
+     already exists for the previous final XGB run.
+   - **Add a per-row typewell-distinctiveness feature** — at the
+     predicted TVT, how unique is the typewell GR pattern within the
+     same typewell? Phase 2 EDA's deepest insight was that the easy↔hard
+     split is a property of *local typewell distinctiveness*. This
+     feature gives the GBDTs the per-row arbitration signal they
+     currently lack. Design pass next session.
+3. (Recorded for completeness) The negative-result rule-outs for dtwc:
+   tuning emit weights/scales is unlikely to flip +0.02 to a meaningful
+   improvement; an aligner-only signal that the GBDTs can't arbitrate
+   is fundamentally limited; future direction is per-row arbitration
+   features or a learned-observation model (sequence neural net).
+
+**Surprises:**
+
+- **Geology was a non-disambiguator.** I'd budgeted geology as a
+  possible v2 fallback if gradient/low-pass didn't suffice. The Panel B
+  re-render with geology bands plus the per-row geo-agreement check
+  showed truth and prediction in the *same* geology segment for 14/20
+  worst wells (median 100% same-geo). The look-alike failure is
+  *within-EGFDL*, not across geology boundaries. Future EDA should
+  always include this kind of programmatic agreement check, not rely
+  solely on visual inspection of bands.
+- **The smoke-test → CV gap was bigger than the prior DTW pass.** When
+  DTW was added (2026-05-08 earlier entry), its raw RMSE wins translated
+  to a +0.12 ensemble OOF improvement. dtwc's larger smoke-test wins
+  delivered −0.02 ensemble OOF. The difference is that DTW's path was
+  consistently better than beam/PF on the same kinds of wells where
+  beam/PF struggled, so the GBDTs learned a stable preference; dtwc's
+  path is sometimes much better and sometimes much worse than dtw, with
+  no per-row signal of which case applies. Lesson for future aligner
+  additions: the right pre-test isn't "is the new aligner more accurate
+  on average?" but "is its prediction reliably arbitrable from existing
+  aligners' predictions, given the features the GBDTs see?"
+- **Per-row arbitration is the real missing piece.** Phase 2 EDA showed
+  the failure is alignment ambiguity in low-distinctiveness regions of
+  the typewell. The GBDTs currently have no signal to identify which
+  rows are in those regions. This reframes FE Round 2: the goal isn't
+  feature pruning + cosmetics, it's giving the GBDTs the input they
+  need to arbitrate.
+
+## 2026-05-08 — Phase 2 wrap-up: distinctiveness fails LGB transferability + LGB-zero pruning is neutral
+
+**What:** Two LGB CV experiments to wrap up Phase 2 GBDT exploration.
+Reused the cached Optuna-tuned `best_params` (heavy regularisation,
+`max_depth=2`, `min_data_in_leaf=110`) so each experiment isolates a
+single feature-set change. v1 LGB used the original 117-feature
+train_df. The current `train_df.parquet` has 6 distinctiveness lookups
+added and 3 zero-importance features dropped (`md_diff`, `gr_missing`,
+`gr_grad2`) — left in place since they were already wired and matched
+the EDA insight; the experiments toggle other dimensions on top.
+
+**Findings:**
+
+| run                                    | features | LGB OOF    | Δ vs v1   |
+|----------------------------------------|----------|------------|-----------|
+| v1 LGB (Optuna-tuned, original 117)    | 117      | **12.640** | —         |
+| Exp A: +6 uniq, −3 zero-gain           | 120      | 12.697     | +0.057    |
+| Exp B: pruned (drop 42 LGB-zero + 6 uniq) | 65    | 12.652     | +0.012    |
+
+- **Exp A confirms transferability of the XGB+CB result.** Distinctiveness
+  features hurt LGB by +0.057 — same direction as the XGB+CB regression
+  earlier today (+0.020). The diagnosis from earlier in the day stands:
+  distinctiveness tells the GBDT *"this prediction is in an ambiguous
+  zone"* but provides no alternative answer when all aligners agree on a
+  wrong layer. Half the signal isn't enough.
+- **Exp B confirms pruning is near-neutral.** Dropping 48 features
+  (41% reduction, including all the GR-derivative rolls/lags/leads
+  LGB already gave zero importance) moves OOF +0.012 — well within
+  fold-RMSE std (0.30 in this run). The LGB-zero list was honest: those
+  features were neither helping nor hurting. Pruning gives a smaller
+  faster model with the same accuracy.
+- Fold-RMSE std is 0.31 (Exp B) and 0.35 (Exp A), comparable to v1's
+  0.30. Folds 2 and 4 are consistently the hardest (12.88–13.07);
+  fold 5 the easiest (12.11–12.12). The fold composition is stable
+  across all three runs.
+
+**Decisions / next steps — Phase 2 closes:**
+
+1. **Phase 2 ends here.** The XGB+CB ensemble (LB 10.364, OOF 12.531)
+   is the Phase 2 best, achieved before any of today's experiments.
+   No new submission warranted. Current ranking on Kaggle: #20.
+2. **Pruning Exp B is informative but not a winning ablation.** A
+   leaner pipeline with the same OOF could matter for compute budgets
+   later, but doesn't move the leaderboard. Not productionising the
+   prune unless we revisit GBDTs.
+3. **Phase 3: pivot to sequence models.** The repeated dead end of the
+   last three experiments (dtwc, distinctiveness, pruning) all confirm
+   the same diagnosis: the GBDTs have absorbed all the signal the
+   hand-engineered aligner outputs and disagreement features can
+   provide, and they can't arbitrate between aligners on a per-row
+   basis. The remaining error budget lives in the alignment-ambiguity
+   wells where all aligners agree on a wrong layer; no GBDT-level
+   feature can fix this. The next lever is a model class that learns
+   the observation likelihood from the GR sequence directly — a 1D
+   CNN or small transformer encoder over MD with cross-attention to
+   the typewell GR. That replaces the hand-engineered aligners with
+   a learned alignment. CLAUDE.md's Q1 from EDA Phase 1 already
+   flagged this as a candidate; today's results make it the clear
+   next step.
+4. **Cleanup completed for disk space.** Deleted ~3.4 GB of stale
+   backups, pre-DTW train_df, and historical OOF parquets. Current
+   live artefacts: tag-grouped XGB+CB OOF (`oof_predictions.parquet`),
+   final XGB + CB models, cached LGB best_params + Optuna study,
+   train_df with 120 cols (distinctiveness in but not used by current
+   submission). Experiment A and B LGB OOFs preserved at
+   `artefacts/lgb_optuna/{uniq,v1}/` for reference.
+
+**Surprises:**
+
+- **Pruning is neutral, not free.** Dropping 41% of features for
+  +0.012 OOF (within fold noise) is a clean ablation showing that
+  importance-based pruning of GBDT-zero features is genuinely
+  information-preserving — the features were zero for a reason. But
+  it's not an improvement. Worth remembering for future reference:
+  "the dropped features were noise" is a true claim only when you
+  measure that the model *can* be trained without them at the same
+  performance.
+- **Distinctiveness was a clean negative result.** All three GBDT
+  variants tested today (XGB+CB ensemble, single LGB) regressed
+  with the feature added. The hypothesis was sound — Phase 2 EDA
+  established that easy↔hard correlates with local typewell
+  distinctiveness — but the implementation gap (no per-row
+  alternative answer to redirect to) is a real conceptual hole, not
+  a tuning issue. Lesson: when a feature provides only a confidence
+  signal and no redirect signal, GBDTs can't exploit it on
+  wells where all base predictions are wrong together.
+- **Fast iteration paid off as predicted.** Today's three OOF runs
+  (XGB+CB aborted, LGB Exp A, LGB Exp B) cost combined ~25 min, vs
+  ~75 min for three full XGB+CB runs. The per-iteration speedup is
+  the right call when the *direction* of feature impact is the
+  question (transferability across GBDT models is high in
+  practice, regardless of magnitude differences).

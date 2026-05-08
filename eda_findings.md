@@ -163,3 +163,123 @@ Per-test-well audit (`leakage_audit()`):
 ✓ No formation-top columns in test horizontals. ✓ `TVT_input` is non-NaN
 exactly on the prefix, NaN exactly on the suffix. ✓ No PNGs for test wells.
 ✓ Spot-checked train PNGs are RGBA ~5000×2800 — exist and openable.
+
+---
+
+## Phase 2 — per-well diagnosis of the worst 20 wells (2026-05-08)
+
+Driver: [notebooks/eda_phase2.ipynb](notebooks/eda_phase2.ipynb) +
+[src/eda_phase2_plots.py](src/eda_phase2_plots.py). 25 figures rendered to
+[eda_outputs/figs/phase2/](eda_outputs/figs/phase2/) — top-20 worst wells by
+ensemble OOF RMSE (tag-grouped CV) plus 5 wells closest to the median RMSE
+as visual contrast.
+
+### Failure mode: confirmed look-alike-layer degeneracy
+
+Panel B (typewell GR vs TVT, with shaded bands for truth and each aligner's
+predicted TVT range) makes the failure mode visible directly:
+
+- On every worst well inspected (86454a6f, 1b1eba53, ba48188d, c8d9680c,
+  2fd68f7b, 5f4d2a52, 7e721392, 8f201368, 389ae58f, 708caea9, 91db7070,
+  fef8af96, 77e4821c, f6d009f4 — 14/20), the truth band and the stacked
+  aligner bands are **narrow and adjacent**, typically 30–50 TVT units
+  apart, and **both lie over typewell regions with visually similar GR
+  character** (similar mean/spread, similar peak structure, similar
+  baseline). The aligners are matching a look-alike layer.
+- All 7 aligners (4 beam configs, pf, ancc, dtw) cluster *together* —
+  they agree with each other and disagree with truth in lockstep. That's
+  the structural signature of a shared GR-magnitude likelihood.
+- Bias direction is mixed: of the 14 worst inspected, 9 negative (predicted
+  too shallow), 5 positive (too deep). Not a directional offset, just a
+  layer-locking ambiguity.
+
+### Easy-well contrast
+
+- 47222616 (RMSE 7.6, bias −0.18), 5aa03df7 (RMSE 7.6, bias +5.7),
+  dc7f9757 (RMSE 7.6, bias +5.0): truth and aligner bands **overlap** in
+  Panel B, and the relevant typewell region contains a distinctive feature
+  (sharp GR transition, plateau boundary, or unique low-GR trough) close
+  to where the bands sit.
+- Implication: aligners do *not* fail on hard wells; they fail in
+  low-distinctiveness GR neighborhoods of the typewell. The signal that
+  separates "easy" from "hard" is the *local distinctiveness* of the
+  truth-region's GR pattern within the typewell.
+
+### Trajectory shape disagreement (Panel C)
+
+Several worst wells show qualitatively wrong trajectory shape, not just an
+offset:
+
+- 1b1eba53, c8d9680c, 91db7070, 5f4d2a52 — aligners track essentially
+  flat through the hidden zone while truth dips by 30–50 units.
+- ba48188d, 7e721392 — aligners over-extrapolate the prefix slope while
+  truth flattens.
+
+The aligners are not getting dipping-rate signal from GR — they inherit it
+from the prefix slope or the smoothness prior. A likelihood that responds
+to *trend* in GR (not just magnitude) would constrain trajectory shape.
+
+### Named alternate-observation candidates for the new aligner
+
+CSV-derivable, test-time legal:
+
+**(A) `dGR/dMD` likelihood.** Compute the gradient of GR along MD on the
+horizontal and along TVT on the typewell. Match candidate TVTs by gradient
+sign and magnitude. Directly attacks the look-alike degeneracy when
+adjacent typewell regions have similar GR magnitudes but different
+*dynamics* (rising vs falling vs flat). Best evidence: 91db7070 and
+5f4d2a52, where truth has a clear slope through a region that aligners
+treat as flat.
+
+**(B) Low-pass (multi-scale) GR likelihood.** Smooth typewell GR with a
+large radius (σ ≈ 50–100 ft TVT), and match against horizontal GR smoothed
+at the same scale. Separates the slow trend (more diagnostic for absolute
+TVT position) from high-frequency noise. Pairs naturally with (A).
+
+**Recommendation:** build a DTW variant on top of the existing DTW
+implementation that uses a composite likelihood combining (A) + (B), with
+a small weight on the existing GR-magnitude likelihood to preserve
+high-frequency matching where it helps. Justified by the panels: every
+worst-well failure has a clean look-alike-layer signature in Panel B that
+either trend (A) or scale (B) should disambiguate.
+
+### Recorded-but-deferred candidates
+
+- **Typewell `Geology`-segment-aware likelihood.** The typewell carries a
+  `Geology` column unused by all current aligners. If the truth band and
+  predicted bands overlap *different* geology segments, geology is a free
+  disambiguator. Worth a v2 EDA pass that adds geology bands to Panel B
+  before committing to a separate aligner.
+- **PNG-derived features.** Train-only `data/train/{well}.png` files
+  contain GR, vertical-plan, and per-well TVT plots. Out of scope for this
+  EDA; recorded for a possible training-only auxiliary signal experiment.
+
+### Geology bands on Panel B — decisive negative result
+
+Re-rendered Panel B with the typewell `Geology` column overlaid as a colored
+strip at the top of the panel, then computed per-row geology agreement
+between truth-TVT and ensemble-predicted-TVT for the worst 20 wells.
+
+| metric | value |
+|---|---|
+| Worst wells where truth & pred share at least one geology | 20/20 |
+| Worst wells where 100% of rows have same geo for truth & pred | 14/20 |
+| Median `pct_rows_same_geo` | 1.00 |
+
+**Geology does not disambiguate the dominant failure.** EGFDL is the
+target zone for the overwhelming majority of worst wells, and both
+truth and predicted bands sit *inside* EGFDL. The look-alike-layer
+ambiguity is *within* a geology segment, not across them.
+
+Wells where geology would help: `389ae58f` (truth spans EGFDL/LBHL/LTGT/LTHL,
+pred only EGFDL — 18% same-geo), `91db7070` (truth in EGFDL/MNSS, 67%),
+`5f4d2a52` (truth in BUDA/Clay/EGFDL, 64%), plus a few smaller deviations
+(`f6d009f4`, `a959858c`, `ba48188d`). That's ~5 of 20 — a real but minor
+secondary signal.
+
+**Decision: skip geology as a likelihood term in the new aligner.** Within-
+EGFDL ambiguity is the dominant failure (~75% of worst wells); geology
+boundaries don't constrain it. Original A+B (gradient + low-pass GR)
+composite stands as the design. Geology is recorded as a possible v2
+refinement aimed at the ~25% boundary-spanning subset, after the gradient/
+low-pass aligner is in place.

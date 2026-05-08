@@ -479,7 +479,7 @@ def compute_geometry_features(
         dz_dmd   = (dz / sdmd).astype(np.float32),
         dist_xy  = np.sqrt(dx**2 + dy**2).astype(np.float32),
         dist_xyz = np.sqrt(dx**2 + dy**2 + dz**2).astype(np.float32),
-        md_diff  = np.diff(md,  prepend=last_known_md).astype(np.float32),
+        # md_diff dropped 2026-05-08 (zero importance in feature_importance.parquet).
         z_diff   = np.diff(z,   prepend=last_known_z).astype(np.float32),
     )
 
@@ -745,6 +745,92 @@ def compute_dtw_features(
 
 
 print("DTW alignment functions loaded.")
+
+
+# ## 5d. Typewell distinctiveness map
+#
+# Phase 2 EDA showed that easy/hard wells differ in the local distinctiveness
+# of the typewell GR pattern at the truth TVT. Easy wells live in regions
+# where the typewell GR is locally unique (sharp transitions, plateau
+# boundaries); hard wells live in regions with multiple look-alike layers.
+#
+# This computes a per-cell distinctiveness score for each typewell:
+#
+#   uniq[j] = min over j' (with |j' - j| > exclude) of
+#             squared L2 distance between typewell-GR window centred at j
+#             and typewell-GR window centred at j',
+#             normalised by 2 * tw_gr.var() * window_size
+#             (so that random-walk-like windows score ~1).
+#
+# Looked up at each row's predicted TVT, this gives the GBDTs the per-row
+# arbitration signal that was missing — "is this aligner's prediction in
+# a distinctive zone (trust it) or an ambiguous zone (downweight)?".
+
+UNIQ_HALF_WINDOW = 50          # cells; W in the docstring above
+UNIQ_EXCLUDE     = 100         # cells; minimum |j' - j| to count as non-overlap
+
+def compute_typewell_distinctiveness(
+    tw_gr: np.ndarray,
+    half_window: int = UNIQ_HALF_WINDOW,
+    exclude:     int = UNIQ_EXCLUDE,
+) -> np.ndarray:
+    """Per-cell self-similarity score on a typewell GR signal.
+
+    Returns an array of length len(tw_gr). Cells with no valid window
+    (within `half_window` of either end) are filled with NaN. The
+    score is the minimum squared L2 distance to any non-overlapping
+    window in the same typewell, normalised so that a typical random
+    pair scores ~1. Smaller score = more ambiguous (a near-twin exists).
+    """
+    T = len(tw_gr)
+    win_size = 2 * half_window + 1
+    out = np.full(T, np.nan, dtype=np.float32)
+    n_win = T - 2 * half_window
+    if n_win <= 1 or T < 2 * exclude + win_size:
+        return out
+
+    windows = np.lib.stride_tricks.sliding_window_view(tw_gr, win_size).astype(np.float64)
+    # Pairwise squared L2 distances via the polarisation identity.
+    sq_norms = (windows ** 2).sum(axis=1)
+    dot      = windows @ windows.T
+    dist     = sq_norms[:, None] + sq_norms[None, :] - 2.0 * dot
+    np.fill_diagonal(dist, np.inf)
+    idx      = np.arange(n_win)
+    too_close = np.abs(idx[:, None] - idx[None, :]) <= exclude
+    dist[too_close] = np.inf
+
+    min_dist = dist.min(axis=1)
+    var      = float(np.var(tw_gr))
+    scale    = 2.0 * max(var, 1e-6) * win_size  # expected sq-distance for random pair
+    score    = (min_dist / scale).astype(np.float32)
+
+    # Place at the centre cell of each window (indices half_window..T-half_window-1).
+    out[half_window:half_window + n_win] = score
+    return out
+
+
+def lookup_distinctiveness(
+    uniq:        np.ndarray,
+    tw_tvt:      np.ndarray,
+    target_tvts: np.ndarray,
+) -> np.ndarray:
+    """Linear-interpolation lookup of distinctiveness at given TVTs.
+
+    NaNs in `uniq` (the un-windowed edges) are forward/back-filled before
+    interpolation so lookups outside the valid window get the nearest
+    valid score rather than NaN.
+    """
+    if len(tw_tvt) == 0 or np.all(np.isnan(uniq)):
+        return np.full(len(target_tvts), np.nan, dtype=np.float32)
+    valid = ~np.isnan(uniq)
+    if not valid.any():
+        return np.full(len(target_tvts), np.nan, dtype=np.float32)
+    # Interpolate only over valid range; np.interp uses end-values as constant
+    # extrapolation, so edge lookups get the nearest valid score automatically.
+    return np.interp(target_tvts, tw_tvt[valid], uniq[valid]).astype(np.float32)
+
+
+print("Typewell distinctiveness functions loaded.")
 
 
 # ## 6. TVT Particle Filter (Z-velocity model)
@@ -1048,6 +1134,25 @@ def build_well_features(
         beam_cons_abs, beam_loose_abs, pf_pred, ancc_pred,
     )
 
+    # ── Typewell distinctiveness features ────────────────────────────────
+    # Per-row "is this aligner's TVT in an ambiguous zone of the typewell?"
+    # signal. Phase 2 EDA showed this is the per-row arbitration signal the
+    # GBDTs were missing.
+    tw_uniq = compute_typewell_distinctiveness(tw_gr)
+    dtw_abs   = df_dtw["dtw_delta"] + lkt
+    pf_abs    = pf_pred
+    ancc_abs  = ancc_pred
+    abs_5     = np.stack([beam_cons_abs, beam_loose_abs, pf_abs, ancc_abs, dtw_abs])
+    consensus_abs = np.median(abs_5, axis=0).astype(np.float32)
+    uniq_features = {
+        "tw_uniq_at_beam_cons":  lookup_distinctiveness(tw_uniq, tw_tvt, beam_cons_abs),
+        "tw_uniq_at_beam_loose": lookup_distinctiveness(tw_uniq, tw_tvt, beam_loose_abs),
+        "tw_uniq_at_pf":         lookup_distinctiveness(tw_uniq, tw_tvt, pf_abs),
+        "tw_uniq_at_ancc":       lookup_distinctiveness(tw_uniq, tw_tvt, ancc_abs),
+        "tw_uniq_at_dtw":        lookup_distinctiveness(tw_uniq, tw_tvt, dtw_abs),
+        "tw_uniq_at_consensus":  lookup_distinctiveness(tw_uniq, tw_tvt, consensus_abs),
+    }
+
     # ── TVT context offset features ───────────────────────────────────────
     offset_feats = {
         f"tw_diff_{int(o):+d}": (
@@ -1082,7 +1187,7 @@ def build_well_features(
         **geo,
         # GR raw
         "gr"            : hgr_sel,
-        "gr_missing"    : hidden["GR"].isna().to_numpy(dtype=np.int8),
+        # gr_missing dropped 2026-05-08 (zero importance).
         "last_known_gr" : np.float32(last_known_gr),
         # GR rolling
         "gr_roll3"   : grd["roll3"].iloc[sel_full].to_numpy(dtype=np.float32),
@@ -1100,7 +1205,7 @@ def build_well_features(
         "gr_range5"  : grd["range5"].iloc[sel_full].to_numpy(dtype=np.float32),
         "gr_range21" : grd["range21"].iloc[sel_full].to_numpy(dtype=np.float32),
         "gr_grad"    : grd["grad"].iloc[sel_full].to_numpy(dtype=np.float32),
-        "gr_grad2"   : grd["grad2"].iloc[sel_full].to_numpy(dtype=np.float32),
+        # gr_grad2 dropped 2026-05-08 (zero importance).
         # GR lags / leads (leads LEGAL — GR fully observed)
         "gr_lag1"    : grd["lag1"].iloc[sel_full].to_numpy(dtype=np.float32),
         "gr_lag5"    : grd["lag5"].iloc[sel_full].to_numpy(dtype=np.float32),
@@ -1146,6 +1251,8 @@ def build_well_features(
         "ancc_pf_diff"       : (ancc_delta - pf_delta)[sel_local],
         # DTW features (indexed into hidden section)
         **{k: v[sel_local] for k, v in df_dtw.items()},
+        # Typewell distinctiveness lookups (per-row arbitration signal)
+        **{k: v[sel_local] for k, v in uniq_features.items()},
         # baseline / typewell residuals
         "baseline_slope"     : baseline_slope,
         "tw_gr_at_slope"     : tw_gr_at_slope,
