@@ -65,6 +65,9 @@ def build_well_inputs(well_df: pd.DataFrame, stats: dict) -> np.ndarray:
     y  = well_df["Y"].to_numpy(dtype=np.float64)
     tvt_input = well_df["TVT_input"].to_numpy(dtype=np.float64)
 
+    # Fill NaN GR with well mean (real data has gaps; synthetic data does not).
+    gr = pd.Series(gr).ffill().bfill().fillna(stats["gr_mean"]).to_numpy()
+
     is_known = (~np.isnan(tvt_input)).astype(np.float32)
     if is_known.sum() == 0:
         raise ValueError("Well has no known prefix")
