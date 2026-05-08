@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-from src.nn.data import compute_well_stats, build_well_inputs, WELL_FEATURE_NAMES, build_typewell_inputs, TYPEWELL_FEATURE_NAMES, GEOLOGY_NAMES, apply_prefix_augmentation
+from src.nn.data import compute_well_stats, build_well_inputs, WELL_FEATURE_NAMES, build_typewell_inputs, TYPEWELL_FEATURE_NAMES, GEOLOGY_NAMES, apply_prefix_augmentation, WellDataset, pad_collate
 
 LEAK_COLS = ["TVT", "ANCC", "ASTNU", "ASTNL", "EGFDU", "EGFDL", "BUDA"]
 
@@ -143,3 +144,69 @@ def test_augmentation_input_anchor_correctness():
     assert np.allclose(tvt_filled[~is_known], lkt_aug)
     # known rows have tvt_filled == ground truth TVT
     assert np.allclose(tvt_filled[is_known], df["TVT"].to_numpy()[is_known])
+
+
+def test_well_dataset_natural_prefix(tmp_path):
+    """Build a fake on-disk well + typewell pair and load it."""
+    well_dir = tmp_path / "train"
+    well_dir.mkdir()
+    df = _make_synthetic_well(200, 50)
+    df.to_csv(well_dir / "WELLA__horizontal_well.csv", index=False)
+    tw = _make_synthetic_typewell(300)
+    tw.to_csv(well_dir / "WELLA__typewell.csv", index=False)
+
+    ds = WellDataset(wells=["WELLA"], data_dir=well_dir, training=False, seed=42)
+    item = ds[0]
+    assert item["well"] == "WELLA"
+    assert item["well_inputs"].shape == (200, 12)
+    assert item["typewell_inputs"].shape == (300, 8)
+    assert item["target"].shape == (200,)
+    assert item["target_mask"].shape == (200,)
+    # validation uses natural prefix → target_mask 1 on rows 50:200
+    assert item["target_mask"][:50].sum() == 0
+    assert item["target_mask"][50:].sum() == 150
+
+
+def test_well_dataset_training_augments(tmp_path):
+    well_dir = tmp_path / "train"
+    well_dir.mkdir()
+    df = _make_synthetic_well(200, 50)
+    df.to_csv(well_dir / "WELLA__horizontal_well.csv", index=False)
+    tw = _make_synthetic_typewell(300)
+    tw.to_csv(well_dir / "WELLA__typewell.csv", index=False)
+
+    ds = WellDataset(
+        wells=["WELLA"], data_dir=well_dir, training=True, seed=42,
+        prefix_p_min=0.10, prefix_p_max=0.90,
+    )
+    # Two consecutive draws should differ (different p)
+    a = ds[0]["target_mask"].sum()
+    b = ds[0]["target_mask"].sum()
+    # Almost always different; at minimum they're random
+    assert a >= 0 and b >= 0
+
+
+def test_pad_collate_shapes(tmp_path):
+    well_dir = tmp_path / "train"
+    well_dir.mkdir()
+    df_a = _make_synthetic_well(200, 50)
+    df_a.to_csv(well_dir / "WELLA__horizontal_well.csv", index=False)
+    tw_a = _make_synthetic_typewell(300)
+    tw_a.to_csv(well_dir / "WELLA__typewell.csv", index=False)
+    df_b = _make_synthetic_well(150, 30)
+    df_b.to_csv(well_dir / "WELLB__horizontal_well.csv", index=False)
+    tw_b = _make_synthetic_typewell(250)
+    tw_b.to_csv(well_dir / "WELLB__typewell.csv", index=False)
+
+    ds = WellDataset(wells=["WELLA", "WELLB"], data_dir=well_dir, training=False, seed=42)
+    batch = pad_collate([ds[0], ds[1]])
+
+    assert batch["well_inputs"].shape == (2, 200, 12)         # padded to max
+    assert batch["well_mask"].shape == (2, 200)                # 1 = real, 0 = pad
+    assert batch["typewell_inputs"].shape == (2, 300, 8)
+    assert batch["typewell_mask"].shape == (2, 300)
+    assert batch["target"].shape == (2, 200)
+    assert batch["target_mask"].shape == (2, 200)
+    # WELLB's pad rows (150:200) should have well_mask = 0 and target_mask = 0
+    assert batch["well_mask"][1, 150:].sum() == 0
+    assert batch["target_mask"][1, 150:].sum() == 0

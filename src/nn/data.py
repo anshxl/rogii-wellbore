@@ -1,7 +1,11 @@
 """Phase 3 NN pipeline — data loading + augmentation + batching."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import torch
+from torch.utils.data import Dataset
 
 
 def compute_well_stats(well_df: pd.DataFrame) -> dict:
@@ -191,3 +195,133 @@ def build_typewell_inputs(tw_df: pd.DataFrame, well_stats: dict) -> np.ndarray:
     assert out.shape == (n, len(TYPEWELL_FEATURE_NAMES))
     assert not np.isnan(out).any()
     return out
+
+
+class WellDataset(Dataset):
+    """Per-well dataset. One well = one example.
+
+    For training: applies random prefix-length augmentation each __getitem__.
+    For validation: uses the natural prefix split (TVT_input mask).
+    """
+
+    def __init__(
+        self,
+        wells: list[str],
+        data_dir: Path,
+        training: bool,
+        seed: int = 42,
+        prefix_p_min: float = 0.10,
+        prefix_p_max: float = 0.90,
+    ):
+        self.wells = list(wells)
+        self.data_dir = Path(data_dir)
+        self.training = training
+        self.prefix_p_min = prefix_p_min
+        self.prefix_p_max = prefix_p_max
+        self._seed = seed
+        self._rng: np.random.Generator | None = None
+
+        # Cache parsed dataframes + stats once.
+        self._cache: dict[str, dict] = {}
+
+    def _ensure_rng(self):
+        if self._rng is None:
+            worker = torch.utils.data.get_worker_info()
+            wid = worker.id if worker else 0
+            self._rng = np.random.default_rng(self._seed + wid)
+
+    def _load_well(self, well: str) -> dict:
+        if well in self._cache:
+            return self._cache[well]
+        h_path = self.data_dir / f"{well}__horizontal_well.csv"
+        t_path = self.data_dir / f"{well}__typewell.csv"
+        well_df = pd.read_csv(h_path)
+        tw_df = pd.read_csv(t_path)
+        stats = compute_well_stats(well_df)
+        well_inputs = build_well_inputs(well_df, stats)
+        tw_inputs = build_typewell_inputs(tw_df, stats)
+        self._cache[well] = {
+            "well_df": well_df,
+            "stats": stats,
+            "well_inputs": well_inputs,
+            "tw_inputs": tw_inputs,
+        }
+        return self._cache[well]
+
+    def __len__(self) -> int:
+        return len(self.wells)
+
+    def __getitem__(self, idx: int) -> dict:
+        self._ensure_rng()
+        well = self.wells[idx]
+        rec = self._load_well(well)
+        well_df = rec["well_df"]
+        well_inputs = rec["well_inputs"]
+        tw_inputs = rec["tw_inputs"]
+        stats = rec["stats"]
+
+        if self.training:
+            p = float(self._rng.uniform(self.prefix_p_min, self.prefix_p_max))
+            aug_inputs, target, target_mask = apply_prefix_augmentation(
+                well_df=well_df,
+                well_inputs=well_inputs,
+                well_stats=stats,
+                p=p,
+                rng=self._rng,
+            )
+        else:
+            # Natural prefix: target = TVT (train only); mask is on hidden rows.
+            is_known_idx = WELL_FEATURE_NAMES.index("is_known_mask")
+            is_known = well_inputs[:, is_known_idx].astype(bool)
+            target_mask = (~is_known).astype(np.float32)
+            if "TVT" in well_df.columns:
+                target = well_df["TVT"].to_numpy(dtype=np.float32)
+            else:
+                target = np.zeros(len(well_inputs), dtype=np.float32)
+            aug_inputs = well_inputs
+
+        return {
+            "well": well,
+            "well_inputs": torch.from_numpy(aug_inputs),
+            "typewell_inputs": torch.from_numpy(tw_inputs),
+            "target": torch.from_numpy(target),
+            "target_mask": torch.from_numpy(target_mask),
+        }
+
+
+def pad_collate(batch: list[dict]) -> dict:
+    """Pad variable-length wells/typewells to per-batch max with attention masks."""
+    B = len(batch)
+    L_well = max(item["well_inputs"].shape[0] for item in batch)
+    L_tw   = max(item["typewell_inputs"].shape[0] for item in batch)
+    F_well = batch[0]["well_inputs"].shape[1]
+    F_tw   = batch[0]["typewell_inputs"].shape[1]
+
+    well_inputs = torch.zeros(B, L_well, F_well, dtype=torch.float32)
+    typewell_inputs = torch.zeros(B, L_tw, F_tw, dtype=torch.float32)
+    well_mask = torch.zeros(B, L_well, dtype=torch.float32)
+    typewell_mask = torch.zeros(B, L_tw, dtype=torch.float32)
+    target = torch.zeros(B, L_well, dtype=torch.float32)
+    target_mask = torch.zeros(B, L_well, dtype=torch.float32)
+
+    wells = []
+    for i, item in enumerate(batch):
+        nw = item["well_inputs"].shape[0]
+        nt = item["typewell_inputs"].shape[0]
+        well_inputs[i, :nw] = item["well_inputs"]
+        well_mask[i, :nw] = 1.0
+        typewell_inputs[i, :nt] = item["typewell_inputs"]
+        typewell_mask[i, :nt] = 1.0
+        target[i, :nw] = item["target"]
+        target_mask[i, :nw] = item["target_mask"]
+        wells.append(item["well"])
+
+    return {
+        "wells": wells,
+        "well_inputs": well_inputs,
+        "well_mask": well_mask,
+        "typewell_inputs": typewell_inputs,
+        "typewell_mask": typewell_mask,
+        "target": target,
+        "target_mask": target_mask,
+    }
