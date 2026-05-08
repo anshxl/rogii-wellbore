@@ -101,6 +101,56 @@ def build_well_inputs(well_df: pd.DataFrame, stats: dict) -> np.ndarray:
     return out
 
 
+def apply_prefix_augmentation(
+    well_df: pd.DataFrame,
+    well_inputs: np.ndarray,
+    well_stats: dict,
+    p: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Random prefix-length augmentation for training.
+
+    Args:
+        well_df: original horizontal CSV (must have a `TVT` column — train only).
+        well_inputs: `build_well_inputs` output for this well.
+        well_stats: as returned by `compute_well_stats`.
+        p: prefix-end MD-fraction in [0, 1].
+        rng: numpy Generator (kept for future stochastic extensions; unused here).
+
+    Returns:
+        aug_inputs: copy of `well_inputs` with `is_known_mask` and
+            `tvt_input_filled` overwritten according to `p`.
+        target: per-row TVT (ground truth).
+        target_mask: 1 on rows where loss contributes (hidden suffix under p),
+            0 elsewhere.
+    """
+    if "TVT" not in well_df.columns:
+        raise ValueError("apply_prefix_augmentation needs ground-truth TVT (train only)")
+
+    md = well_df["MD"].to_numpy(dtype=np.float64)
+    md_range = max(well_stats["md_max"] - well_stats["md_min"], 1e-6)
+    md_norm = (md - well_stats["md_min"]) / md_range
+    is_known_aug = (md_norm <= p).astype(np.float32)
+    if is_known_aug.sum() == 0:
+        # degenerate: at least keep the first row known
+        is_known_aug[0] = 1.0
+
+    tvt = well_df["TVT"].to_numpy(dtype=np.float64)
+    last_idx = int(np.flatnonzero(is_known_aug)[-1])
+    lkt_aug = float(tvt[last_idx])
+
+    is_known_idx = WELL_FEATURE_NAMES.index("is_known_mask")
+    tvt_idx = WELL_FEATURE_NAMES.index("tvt_input_filled")
+
+    aug_inputs = well_inputs.copy()
+    aug_inputs[:, is_known_idx] = is_known_aug
+    aug_inputs[:, tvt_idx] = np.where(is_known_aug.astype(bool), tvt, lkt_aug).astype(np.float32)
+
+    target = tvt.astype(np.float32)
+    target_mask = (1.0 - is_known_aug).astype(np.float32)
+    return aug_inputs, target, target_mask
+
+
 GEOLOGY_NAMES = ["ANCC", "ASTNU", "ASTNL", "EGFDU", "EGFDL", "BUDA"]
 TYPEWELL_FEATURE_NAMES = [
     "tw_gr_z",

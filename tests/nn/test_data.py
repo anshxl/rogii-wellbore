@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.nn.data import compute_well_stats, build_well_inputs, WELL_FEATURE_NAMES, build_typewell_inputs, TYPEWELL_FEATURE_NAMES, GEOLOGY_NAMES
+from src.nn.data import compute_well_stats, build_well_inputs, WELL_FEATURE_NAMES, build_typewell_inputs, TYPEWELL_FEATURE_NAMES, GEOLOGY_NAMES, apply_prefix_augmentation
 
 LEAK_COLS = ["TVT", "ANCC", "ASTNU", "ASTNL", "EGFDU", "EGFDL", "BUDA"]
 
@@ -87,3 +87,59 @@ def test_build_typewell_geology_onehot():
     geo_block = out[:, geo_idx_start:geo_idx_end]
     # each row has exactly one 1 across the 6 geology columns
     assert (geo_block.sum(axis=1) == 1.0).all()
+
+
+def test_augmentation_preserves_total_length():
+    df = _make_synthetic_well(n_rows=200, prefix_len=50)
+    stats = compute_well_stats(df)
+    inputs = build_well_inputs(df, stats)
+    rng = np.random.default_rng(42)
+
+    aug_inputs, target, target_mask = apply_prefix_augmentation(
+        well_df=df, well_inputs=inputs, well_stats=stats, p=0.5, rng=rng,
+    )
+    assert aug_inputs.shape == inputs.shape
+    assert target.shape == (200,)
+    assert target_mask.shape == (200,)
+
+
+def test_augmentation_target_only_on_hidden():
+    """Loss must contribute only on rows where is_known_aug = 0."""
+    df = _make_synthetic_well(n_rows=200, prefix_len=50)
+    stats = compute_well_stats(df)
+    inputs = build_well_inputs(df, stats)
+    rng = np.random.default_rng(42)
+
+    p = 0.30
+    aug_inputs, target, target_mask = apply_prefix_augmentation(
+        well_df=df, well_inputs=inputs, well_stats=stats, p=p, rng=rng,
+    )
+    is_known_idx = WELL_FEATURE_NAMES.index("is_known_mask")
+    is_known = aug_inputs[:, is_known_idx].astype(bool)
+    # target_mask is 1 where target counts; this should be exactly the hidden rows
+    assert (target_mask == (~is_known).astype(np.float32)).all()
+
+
+def test_augmentation_input_anchor_correctness():
+    """At hidden rows, TVT_input_filled must equal last_known TVT under p."""
+    df = _make_synthetic_well(n_rows=200, prefix_len=50)
+    stats = compute_well_stats(df)
+    inputs = build_well_inputs(df, stats)
+    rng = np.random.default_rng(42)
+
+    p = 0.30  # prefix to MD-row 60
+    aug_inputs, target, target_mask = apply_prefix_augmentation(
+        well_df=df, well_inputs=inputs, well_stats=stats, p=p, rng=rng,
+    )
+    is_known_idx = WELL_FEATURE_NAMES.index("is_known_mask")
+    tvt_idx = WELL_FEATURE_NAMES.index("tvt_input_filled")
+
+    is_known = aug_inputs[:, is_known_idx].astype(bool)
+    tvt_filled = aug_inputs[:, tvt_idx]
+
+    # last_known under augmentation = TVT at the last is_known_aug=1 row
+    lkt_aug = float(df["TVT"].to_numpy()[is_known][-1])
+    # all hidden rows have tvt_filled == lkt_aug
+    assert np.allclose(tvt_filled[~is_known], lkt_aug)
+    # known rows have tvt_filled == ground truth TVT
+    assert np.allclose(tvt_filled[is_known], df["TVT"].to_numpy()[is_known])
