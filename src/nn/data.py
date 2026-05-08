@@ -99,3 +99,45 @@ def build_well_inputs(well_df: pd.DataFrame, stats: dict) -> np.ndarray:
     assert out.shape == (n, len(WELL_FEATURE_NAMES))
     assert not np.isnan(out).any()
     return out
+
+
+GEOLOGY_NAMES = ["ANCC", "ASTNU", "ASTNL", "EGFDU", "EGFDL", "BUDA"]
+TYPEWELL_FEATURE_NAMES = [
+    "tw_gr_z",
+    "tw_tvt_z",
+] + [f"geo_{g}" for g in GEOLOGY_NAMES]
+
+
+def build_typewell_inputs(tw_df: pd.DataFrame, well_stats: dict) -> np.ndarray:
+    """Build [L_tw, 8] per-row typewell inputs.
+
+    GR z-scored against the *well's* GR statistics (cross-well normalization).
+    TVT z-scored against the typewell's own TVT statistics.
+    Geology one-hot over the 6 known classes; unknown geologies -> all zeros.
+    """
+    n = len(tw_df)
+    tw_gr = tw_df["GR"].to_numpy(dtype=np.float64)
+    tw_tvt = tw_df["TVT"].to_numpy(dtype=np.float64)
+
+    gr_z = (tw_gr - well_stats["gr_mean"]) / max(well_stats["gr_std"], 1e-6)
+    tvt_mean = float(np.mean(tw_tvt))
+    tvt_std = float(np.std(tw_tvt) or 1.0)
+    tvt_z = (tw_tvt - tvt_mean) / tvt_std
+
+    geo_strings = (
+        tw_df["Geology"].astype(str).to_numpy()
+        if "Geology" in tw_df.columns
+        else np.array(["UNK"] * n)
+    )
+    onehot = np.zeros((n, len(GEOLOGY_NAMES)), dtype=np.float32)
+    for i, g in enumerate(GEOLOGY_NAMES):
+        onehot[:, i] = (geo_strings == g).astype(np.float32)
+
+    out = np.concatenate([
+        gr_z.astype(np.float32)[:, None],
+        tvt_z.astype(np.float32)[:, None],
+        onehot,
+    ], axis=1)
+    assert out.shape == (n, len(TYPEWELL_FEATURE_NAMES))
+    assert not np.isnan(out).any()
+    return out

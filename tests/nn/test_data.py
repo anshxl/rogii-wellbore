@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.nn.data import compute_well_stats, build_well_inputs, WELL_FEATURE_NAMES
+from src.nn.data import compute_well_stats, build_well_inputs, WELL_FEATURE_NAMES, build_typewell_inputs, TYPEWELL_FEATURE_NAMES, GEOLOGY_NAMES
 
 LEAK_COLS = ["TVT", "ANCC", "ASTNU", "ASTNL", "EGFDU", "EGFDL", "BUDA"]
 
@@ -57,3 +57,33 @@ def test_build_well_inputs_no_leakage():
     # leakage columns should not appear in the feature names list
     for col in LEAK_COLS:
         assert col not in WELL_FEATURE_NAMES, f"{col} leaked into feature list"
+
+
+def _make_synthetic_typewell(n=300):
+    return pd.DataFrame({
+        "TVT": np.linspace(900, 1300, n),
+        "GR":  60 + 10 * np.sin(np.linspace(0, 6.28, n)),
+        "Geology": (["EGFDU"] * (n // 3) + ["EGFDL"] * (n // 3) + ["ANCC"] * (n - 2 * (n // 3))),
+    })
+
+
+def test_build_typewell_inputs_shape():
+    well_df = _make_synthetic_well(200, 50)
+    well_stats = compute_well_stats(well_df)
+    tw = _make_synthetic_typewell(300)
+    out = build_typewell_inputs(tw, well_stats)
+    assert out.shape == (300, len(TYPEWELL_FEATURE_NAMES))
+    assert len(TYPEWELL_FEATURE_NAMES) == 8
+    assert not np.isnan(out).any()
+
+
+def test_build_typewell_geology_onehot():
+    well_df = _make_synthetic_well(200, 50)
+    well_stats = compute_well_stats(well_df)
+    tw = _make_synthetic_typewell(300)
+    out = build_typewell_inputs(tw, well_stats)
+    geo_idx_start = TYPEWELL_FEATURE_NAMES.index(f"geo_{GEOLOGY_NAMES[0]}")
+    geo_idx_end = geo_idx_start + len(GEOLOGY_NAMES)
+    geo_block = out[:, geo_idx_start:geo_idx_end]
+    # each row has exactly one 1 across the 6 geology columns
+    assert (geo_block.sum(axis=1) == 1.0).all()
