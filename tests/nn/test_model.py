@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from src.nn.model import DummyMLP, masked_mse
+from src.nn.model import DummyMLP, masked_mse, Model
 
 
 def test_dummy_mlp_forward_shape():
@@ -35,3 +35,40 @@ def test_masked_mse_only_counts_target_mask():
     loss = masked_mse(pred, target, target_mask)
     # MSE on rows 0 and 2: ((12-10)^2 + (33-30)^2) / 2 = (4 + 9) / 2 = 6.5
     assert loss.item() == pytest.approx(6.5, rel=1e-5)
+
+
+def test_model_cnn_forward_shape():
+    model = Model(
+        encoder_kind="cnn",
+        n_well_features=12,
+        n_typewell_features=8,
+        d_model=128,
+    )
+    well_inputs = torch.randn(2, 800, 12)
+    well_mask = torch.ones(2, 800)
+    typewell_inputs = torch.randn(2, 600, 8)
+    typewell_mask = torch.ones(2, 600)
+    out = model(
+        well_inputs=well_inputs, well_mask=well_mask,
+        typewell_inputs=typewell_inputs, typewell_mask=typewell_mask,
+    )
+    assert out.shape == (2, 800)
+
+
+def test_model_initial_output_near_tvt_anchor():
+    """Untrained Model with zero-initialized head must output ≈ TVT_input_filled."""
+    torch.manual_seed(0)
+    model = Model(encoder_kind="cnn", n_well_features=12,
+                  n_typewell_features=8, d_model=64)
+    well_inputs = torch.zeros(1, 100, 12)
+    tvt_idx = 7  # tvt_input_filled
+    ramp = torch.linspace(1000.0, 1050.0, 100)
+    well_inputs[0, :, tvt_idx] = ramp
+    well_mask = torch.ones(1, 100)
+    typewell_inputs = torch.randn(1, 200, 8)
+    typewell_mask = torch.ones(1, 200)
+    out = model(
+        well_inputs=well_inputs, well_mask=well_mask,
+        typewell_inputs=typewell_inputs, typewell_mask=typewell_mask,
+    )
+    assert torch.allclose(out[0], ramp, atol=5.0)

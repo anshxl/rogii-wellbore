@@ -14,6 +14,9 @@ from src.nn.model import DummyMLP, masked_mse
 def _build_model(kind: str) -> torch.nn.Module:
     if kind == "dummy":
         return DummyMLP(n_well_features=12, hidden=64)
+    if kind == "cnn":
+        from src.nn.model import Model
+        return Model(encoder_kind="cnn")
     raise ValueError(f"Unknown model kind: {kind!r}")
 
 
