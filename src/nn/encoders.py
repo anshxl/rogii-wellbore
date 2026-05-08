@@ -43,3 +43,28 @@ class TypewellEncoder(nn.Module):
             h = block(h)
         h = h.transpose(1, 2)        # [B, L, D]
         return h
+
+
+class CNNEncoder(nn.Module):
+    """Dilated 1D CNN encoder over the well sequence (per spec §Architecture).
+
+    Stack of dilated Conv1d blocks (kernel 3; dilations 1,2,4,8,16,32).
+    Receptive field ≈ 190 rows on the MD axis at n_blocks=6.
+    """
+
+    def __init__(self, in_features: int = 12, d_model: int = 128, n_blocks: int = 6):
+        super().__init__()
+        self.proj = nn.Linear(in_features, d_model)
+        self.blocks = nn.ModuleList([
+            _DilatedConvBlock(channels=d_model, kernel=3, dilation=2 ** i, dropout=0.1)
+            for i in range(n_blocks)
+        ])
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        h = self.proj(x)             # [B, L, D]
+        h = h * mask.unsqueeze(-1)
+        h = h.transpose(1, 2)        # [B, D, L]
+        for block in self.blocks:
+            h = block(h)
+        h = h.transpose(1, 2)        # [B, L, D]
+        return h
