@@ -1,0 +1,36 @@
+# OS / editor cruft
+.DS_Store
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Python env / package manager
+.venv/
+
+# Claude internal
+.claude/
+
+# Raw competition data (~1GB; never commit)
+data/
+
+# Run-time logs and per-run metadata
+outputs/
+catboost_info/
+
+# EDA figures (regenerable from notebooks/eda_pipeline.py + eda_phase1.ipynb)
+eda_outputs/figs/
+
+# Heavyweight or fully-regenerable training artefacts.
+# Small JSON "experiment records" (features.json, best_iters.json,
+# ensemble_weights.json, lgb_optuna/best_params.json,
+# lgb_optuna/best_iters.json) ARE committed.
+artefacts/*.parquet
+artefacts/*.cbm
+artefacts/final_*.json
+artefacts/features_no-dtw.json
+artefacts/lgb_optuna/*.parquet
+artefacts/lgb_optuna/*.txt
+artefacts/lgb_optuna/*.db
+
+# Kaggle submission bundle (regenerable)
+wellbore-baseline-bundle.zip
