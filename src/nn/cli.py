@@ -11,6 +11,8 @@ Other env vars:
     ARTEFACT_DIR — overrides repo artefacts dir
     SEED        — default 42
     DEBUG_MAX_WELLS — for smoke runs
+    AUGMENT     — on (default) | off. When off, train set uses natural prefix
+                  split (no random prefix augmentation). Diagnostic only.
 """
 
 import json
@@ -102,6 +104,10 @@ def main_fold():
     n_epochs = int(os.environ.get("N_EPOCHS", "50"))
     batch_size = int(os.environ.get("BATCH_SIZE", "16"))
     device = os.environ.get("DEVICE", "cuda" if _cuda_available() else "cpu")
+    augment_raw = os.environ.get("AUGMENT", "on").strip().lower()
+    augment = augment_raw not in {"off", "0", "false", "no"}
+    print(f"[main_fold] fold={fold_idx} model={model_kind} epochs={n_epochs} "
+          f"batch={batch_size} device={device} augment={'on' if augment else 'OFF (diagnostic)'}")
 
     wells = _list_train_wells(data_dir, max_wells=None)
 
@@ -139,7 +145,9 @@ def main_fold():
         device=device,
         seed=seed,
         fold_idx=fold_idx,
+        augment=augment,
     )
+    metrics["augment"] = augment
     metrics_path = art / f"fold_{fold_idx}_metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2, default=str))
     print(f"Wrote {metrics_path}")

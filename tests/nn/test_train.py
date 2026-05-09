@@ -65,3 +65,26 @@ def test_train_one_fold_smoke(tmp_path):
     assert not any(np.isnan(metrics["train_loss_per_epoch"]))
     # Checkpoint must exist
     assert (artefact_dir / "fold_models" / "fold_0.pt").exists()
+
+
+def test_train_one_fold_augment_off(tmp_path):
+    """augment=False uses the natural prefix split on train wells too."""
+    data_dir = _build_tiny_dataset(tmp_path)
+    artefact_dir = tmp_path / "artefacts"
+    artefact_dir.mkdir()
+    metrics = train_one_fold(
+        train_wells=[f"W{i}" for i in range(4)],
+        val_wells=["W4"],
+        data_dir=data_dir,
+        artefact_dir=artefact_dir,
+        model_kind="dummy",
+        n_epochs=2,
+        batch_size=2,
+        lr=1e-3,
+        device="cpu",
+        seed=42,
+        fold_idx=0,
+        augment=False,
+    )
+    assert not any(np.isnan(metrics["train_loss_per_epoch"]))
+    assert (artefact_dir / "fold_models" / "fold_0.pt").exists()

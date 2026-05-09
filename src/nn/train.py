@@ -59,12 +59,19 @@ def train_one_fold(
     device:      str = "cpu",
     seed:        int = 42,
     fold_idx:    int = 0,
+    augment:     bool = True,
 ) -> dict:
-    """Train a single fold; save best checkpoint; return metrics dict."""
+    """Train a single fold; save best checkpoint; return metrics dict.
+
+    `augment=False` disables random prefix-length augmentation: the train set
+    uses each well's natural prefix split, the same as validation. Useful as
+    a diagnostic — does the model learn the actual task at all, separated
+    from augmentation noise?
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    train_ds = WellDataset(train_wells, data_dir=data_dir, training=True, seed=seed)
+    train_ds = WellDataset(train_wells, data_dir=data_dir, training=augment, seed=seed)
     val_ds   = WellDataset(val_wells,   data_dir=data_dir, training=False, seed=seed)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
