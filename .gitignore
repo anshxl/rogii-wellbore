@@ -24,13 +24,13 @@ eda_outputs/figs/
 # Small JSON "experiment records" (features.json, best_iters.json,
 # ensemble_weights.json, lgb_optuna/best_params.json,
 # lgb_optuna/best_iters.json) ARE committed.
-artefacts/*.parquet
-artefacts/*.cbm
+artefacts/**/*.parquet
+artefacts/**/*.cbm
+artefacts/**/*.pt
 artefacts/final_*.json
 artefacts/features_no-dtw.json
-artefacts/lgb_optuna/*.parquet
-artefacts/lgb_optuna/*.txt
-artefacts/lgb_optuna/*.db
+artefacts/lgb_optuna/**/*.txt
+artefacts/lgb_optuna/**/*.db
 
 # Kaggle submission bundle (regenerable)
 wellbore-baseline-bundle.zip
