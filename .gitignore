@@ -34,3 +34,4 @@ artefacts/lgb_optuna/*.db
 
 # Kaggle submission bundle (regenerable)
 wellbore-baseline-bundle.zip
+src.zip
