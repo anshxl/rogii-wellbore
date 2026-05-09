@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from src.nn.data import WellDataset, pad_collate
 from src.nn.model import DummyMLP, masked_mse
@@ -96,10 +97,17 @@ def train_one_fold(
     epochs_since_improve = 0
     step = 0
 
-    for epoch in range(n_epochs):
+    epoch_bar = tqdm(range(n_epochs), desc=f"fold {fold_idx}", unit="epoch")
+    for epoch in epoch_bar:
         model.train(True)
         epoch_loss, n_batches = 0.0, 0
-        for batch in train_loader:
+        batch_bar = tqdm(
+            train_loader,
+            desc=f"  epoch {epoch+1}/{n_epochs}",
+            unit="batch",
+            leave=False,
+        )
+        for batch in batch_bar:
             for g in optim.param_groups:
                 g["lr"] = lr * lr_at(step)
             optim.zero_grad(set_to_none=True)
@@ -120,13 +128,15 @@ def train_one_fold(
             step += 1
             epoch_loss += float(loss.item())
             n_batches += 1
+            batch_bar.set_postfix(loss=f"{epoch_loss / n_batches:.3f}")
         avg_loss = epoch_loss / max(n_batches, 1)
         train_loss_per_epoch.append(avg_loss)
 
         val_rmse = _score_val(model, val_loader, device)
         val_rmse_per_epoch.append(val_rmse)
 
-        if val_rmse < best_val:
+        improved = val_rmse < best_val
+        if improved:
             best_val = val_rmse
             epochs_since_improve = 0
             torch.save({
@@ -137,8 +147,16 @@ def train_one_fold(
             }, ckpt_path)
         else:
             epochs_since_improve += 1
-            if epochs_since_improve >= early_stop_patience:
-                break
+
+        epoch_bar.set_postfix(
+            train=f"{avg_loss:.3f}",
+            val=f"{val_rmse:.3f}",
+            best=f"{best_val:.3f}",
+            patience=f"{epochs_since_improve}/{early_stop_patience}",
+        )
+
+        if not improved and epochs_since_improve >= early_stop_patience:
+            break
 
     return {
         "fold_idx": fold_idx,
