@@ -82,9 +82,85 @@ def main_smoke():
     print(f"Wrote {oof_path} with {len(oof)} rows")
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def main_fold():
+    """Train one fold using assign_groups for the split. FOLD env var picks fold idx."""
+    import sys
+    sys.path.insert(0, str(REPO_ROOT))
+    from src.baseline import assign_groups, TRAIN_DIR
+
+    data_dir, art, model_kind = _resolve_paths()
+    seed = int(os.environ.get("SEED", "42"))
+    fold_idx = int(os.environ.get("FOLD", "0"))
+    n_epochs = int(os.environ.get("N_EPOCHS", "50"))
+    batch_size = int(os.environ.get("BATCH_SIZE", "16"))
+    device = os.environ.get("DEVICE", "cuda" if _cuda_available() else "cpu")
+
+    wells = _list_train_wells(data_dir, max_wells=None)
+
+    # Build a df with per-row x/y so assign_groups can compute pad centroids.
+    train_dir = data_dir / "train"
+    chunks = []
+    for w in wells:
+        hw = train_dir / f"{w}__horizontal_well.csv"
+        chunk = pd.read_csv(hw, usecols=["X", "Y"])
+        chunk["well"] = w
+        chunk = chunk.rename(columns={"X": "x", "Y": "y"})
+        chunks.append(chunk[["well", "x", "y"]])
+    df = pd.concat(chunks, ignore_index=True)
+    df = assign_groups(df, data_dir=TRAIN_DIR)
+
+    # One group label per well (assign_groups sets group_id per row).
+    well_group = df.groupby("well")["group_id"].first().reset_index()
+    well_group.columns = ["well", "group"]
+
+    # Same fold construction as src/baseline.py: GroupKFold over `group`.
+    from sklearn.model_selection import GroupKFold
+    folds = list(GroupKFold(n_splits=5).split(well_group, groups=well_group["group"]))
+    train_idx, val_idx = folds[fold_idx]
+    train_wells = well_group.iloc[train_idx]["well"].tolist()
+    val_wells   = well_group.iloc[val_idx]["well"].tolist()
+
+    metrics = train_one_fold(
+        train_wells=train_wells,
+        val_wells=val_wells,
+        data_dir=data_dir / "train",
+        artefact_dir=art,
+        model_kind=model_kind,
+        n_epochs=n_epochs,
+        batch_size=batch_size,
+        device=device,
+        seed=seed,
+        fold_idx=fold_idx,
+    )
+    metrics_path = art / f"fold_{fold_idx}_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2, default=str))
+    print(f"Wrote {metrics_path}")
+
+    oof = predict_oof_fold(
+        val_wells=val_wells,
+        data_dir=data_dir / "train",
+        checkpoint_path=art / "fold_models" / f"fold_{fold_idx}.pt",
+        fold_idx=fold_idx,
+        device=device,
+    )
+    oof_path = art / f"oof_fold_{fold_idx}.parquet"
+    oof.to_parquet(oof_path)
+    print(f"Wrote {oof_path} ({len(oof)} rows)")
+
+
 if __name__ == "__main__":
     mode = os.environ.get("MODE", "smoke")
     if mode == "smoke":
         main_smoke()
+    elif mode == "fold":
+        main_fold()
     else:
-        raise NotImplementedError(f"MODE={mode!r} not implemented in M1")
+        raise NotImplementedError(f"MODE={mode!r} not implemented")

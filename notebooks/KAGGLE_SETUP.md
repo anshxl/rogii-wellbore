@@ -79,3 +79,18 @@ The notebooks already check:
 - TVT prediction range falls in a sensible band.
 
 If FE fails on a single well, the dataset builder logs a warning and skips it. **If that happens, the submission build will raise** because some `prediction_id`s won't have predictions. Fix the underlying issue rather than masking it — silent zero-fills score 0 on those rows.
+
+## Phase 3 — NN training on Kaggle T4
+
+### One-time setup
+1. Bundle current code: `cd /Users/AnshulSrivastava/Desktop/wellbore-prediction && zip -r /tmp/src.zip src` (or use whatever bundling step matches existing Phase 1/2 workflow).
+2. Upload `/tmp/src.zip` as a private Kaggle dataset named `wellbore-prediction-code`.
+3. Verify the existing `wellbore-prediction-data` dataset is attached to the notebook and contains the `train/` folder structure.
+
+### Per training run
+1. Update the `wellbore-prediction-code` dataset version with the latest `src/`.
+2. Open `notebooks/nn_phase3_kaggle_fold0.ipynb` on Kaggle.
+3. Set the GPU accelerator to T4 ×1 in the notebook settings.
+4. Run all cells. Expected wall time: 30–60 min for a full fold at N_EPOCHS=50.
+5. Download `/kaggle/working/artefacts/nn/cnn/fold_models/fold_0.pt` and `oof_fold_0.parquet` from the notebook's Output tab.
+6. Add both files to a new private dataset `wellbore-prediction-nn-checkpoints` (or version an existing one). The submission notebook will read from there.
